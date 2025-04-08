@@ -61,3 +61,12 @@ Now you can use `Ctrl + Shift + S` anywhere on your system to start/stop recordi
 ## Customization
 
 This project is designed to be hackable! If you want to change the key combination used to trigger recording, modify the `hook.Register` line in `client_src/main.go`.
+
+## Demo
+
+![Speech-to-Type Demo](docs/demo.gif)
+
+**Notes on the Demo:**
+
+*   The demo video does not include sound. To see when recording starts and stops, watch the top-left terminal for the log messages (e.g., "🎤 Started Listening...", "🛑 Stopped Listening..."). The recording phase takes the most time; the transcription itself is very fast.
+*   The transcribed text is typed automatically using accessibility features based on where your **cursor focus** currently is. Avoid clicking the mouse or changing the active input field between stopping the recording and the text appearing, otherwise the text might be typed in the wrong place.
