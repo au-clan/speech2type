@@ -9,11 +9,11 @@ import numpy as np
 import io
 
 
-# Configure device and precision
+# The following code is somewhat hardcoded for MacOS and apple silicon.
+# if you're running this on a computer with CUDA, you might want to use the following snippet instead:
 # device = "cuda:0" if torch.cuda.is_available(
 # ) else "mps" if torch.backends.mps.is_available() else "cpu"
 
-# doesn't work for quantized model
 do_compile = False
 
 if do_compile:
@@ -25,9 +25,7 @@ else:
     torch_dtype = torch.float16
     attn_implementation = "sdpa"
 
-# Update to use Whisper Turbo model
 model_id = "openai/whisper-large-v3-turbo"
-# model_id = "Yehor/whisper-large-v3-turbo-quantized-uk"
 
 # Load model
 model = AutoModelForSpeechSeq2Seq.from_pretrained(
@@ -56,12 +54,12 @@ pipe = pipeline(
 )
 
 # Run a test
-dataset = load_dataset("distil-whisper/librispeech_long",
-                       "clean", split="validation")
-sample = dataset[0]["audio"]
-result = pipe(sample, return_timestamps=True,
-              generate_kwargs={"language": "english"})
-print(result["text"])
+# dataset = load_dataset("distil-whisper/librispeech_long",
+#                        "clean", split="validation")
+# sample = dataset[0]["audio"]
+# result = pipe(sample, return_timestamps=True,
+#               generate_kwargs={"language": "english"})
+# print(result["text"])
 
 # Set up server to provide hosted transcription
 app = FastAPI()
