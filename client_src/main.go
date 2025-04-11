@@ -125,9 +125,30 @@ func stopRecordingAndSend() {
 	} else {
 		fmt.Println("✅ Transcription received:", transcription)
 
-		// Type the transcribed text using RobotGo
-		fmt.Println("⌨️  Typing transcription...")
-		robotgo.TypeStr(transcription)
+		// Save current clipboard, paste transcription, then restore clipboard
+		fmt.Println("⌨️  Pasting transcription...")
+		originalClipboardContent, err := robotgo.ReadAll()
+		if err != nil {
+			fmt.Println("Warning: Could not read clipboard:", err)
+			// Fallback to typing if clipboard read fails
+			robotgo.TypeStr(transcription)
+		} else {
+			// Restore clipboard content when the function exits
+			defer func() {
+				if err := robotgo.WriteAll(originalClipboardContent); err != nil {
+					fmt.Println("Warning: Could not restore clipboard:", err)
+				}
+			}()
+
+			// Write transcription to clipboard and paste
+			if err := robotgo.WriteAll(transcription); err != nil {
+				fmt.Println("Warning: Could not write to clipboard:", err)
+				// Fallback to typing if clipboard write fails
+				robotgo.TypeStr(transcription)
+			} else {
+				robotgo.KeyTap("v", "cmd")
+			}
+		}
 	}
 }
 
