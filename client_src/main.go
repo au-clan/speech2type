@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/gen2brain/malgo"
 	"github.com/go-audio/audio"
@@ -30,10 +31,19 @@ var (
 	capturedSampleCount uint32
 	mutex               sync.Mutex
 	serverURL           = "http://localhost:8000/speechtotext"
+
+	// Store the last successfully recorded audio and its transcription
+	lastCapturedSamples []byte
+	lastTranscription   string
+	
+	// Add cooldown tracking to prevent rapid repeated triggers
+	lastRetypeTime      time.Time
 )
 
 func main() {
 	fmt.Println("--- Press Ctrl + Shift + S to start/stop listening ---")
+	fmt.Println("--- Press Ctrl + Shift + Q to resend last audio ---")
+	fmt.Println("--- Press Ctrl + Shift + 2 to retype last transcription ---")
 
 	// Initialize malgo
 	var err error
@@ -46,7 +56,27 @@ func main() {
 	}
 	defer cleanup()
 
-	// Register the hotkey: Ctrl + Shift + S
+	// Register the hotkey: Ctrl + Shift + Q (Resend last audio)
+	hook.Register(hook.KeyDown, []string{"q", "ctrl", "shift"}, func(e hook.Event) {
+		if isListening {
+			fmt.Println("Currently listening. Stop recording (Ctrl+Shift+S) before resending.")
+			return
+		}
+
+		mutex.Lock()
+		audioToSend := lastCapturedSamples
+		mutex.Unlock()
+
+		if len(audioToSend) == 0 {
+			fmt.Println("No previous audio recording found to resend.")
+			return
+		}
+
+		fmt.Println("🔁 Resending last recorded audio...")
+		handleAudioTranscription(audioToSend) // Use the refactored handler
+	})
+
+	// Register the hotkey: Ctrl + Shift + S (Record only)
 	hook.Register(hook.KeyDown, []string{"s", "ctrl", "shift"}, func(e hook.Event) {
 		if isListening {
 			stopRecordingAndSend()
@@ -55,8 +85,39 @@ func main() {
 		}
 	})
 
+	// Register the hotkey: Ctrl + Shift + 2 (Retype last transcription)
+	hook.Register(hook.KeyDown, []string{"2", "ctrl", "shift"}, func(e hook.Event) {
+		// Check for cooldown period (prevent multiple rapid triggers)
+		if time.Since(lastRetypeTime) < 1*time.Second {
+			fmt.Println("⚠️ Retype cooldown active, ignoring request")
+			return
+		}
+		
+		// Update last retype time
+		lastRetypeTime = time.Now()
+		
+		// Get the transcription safely
+		mutex.Lock()
+		transcriptionToType := lastTranscription
+		mutex.Unlock()
+
+		if transcriptionToType == "" {
+			fmt.Println("No previous transcription found to retype.")
+			return
+		}
+
+		fmt.Println("⌨️ Retyping last transcription...")
+		
+		// Create a goroutine to type with a small delay to ensure all keys are released
+		go func() {
+			// Wait a short time to ensure all keys are released
+			time.Sleep(300 * time.Millisecond)
+			robotgo.TypeStr(transcriptionToType)
+		}()
+	})
+
 	// Start the event hook
-	s := hook.Start()
+ 	s := hook.Start()
 	<-hook.Process(s)
 }
 
@@ -102,52 +163,91 @@ func startRecording() {
 	}
 }
 
-// Stops recording, sends audio, and types the transcription
+// Stops recording and initiates the transcription process
 func stopRecordingAndSend() {
 	fmt.Println("🛑 Stopped Listening...")
 	isListening = false
 
 	if recordDevice != nil {
-		recordDevice.Stop()
+		// It's crucial to Stop() *before* Uninit()
+		err := recordDevice.Stop()
+		if err != nil {
+			fmt.Println("Error stopping capture device:", err)
+			// Continue anyway to try and process potentially captured audio
+		}
 		recordDevice.Uninit()
 		recordDevice = nil
+	} else {
+		fmt.Println("No active recording device found.")
+		// Potentially check if there are samples anyway? For now, return.
+		return
 	}
 
-	if len(pCapturedSamples) == 0 {
+	mutex.Lock()
+	samplesToProcess := pCapturedSamples
+	// Store the recorded audio immediately, regardless of transcription success
+	if len(pCapturedSamples) > 0 {
+		lastCapturedSamples = make([]byte, len(pCapturedSamples))
+		copy(lastCapturedSamples, pCapturedSamples)
+		fmt.Println("📼 Recorded audio saved for potential resending.")
+	}
+	mutex.Unlock()
+
+	if len(samplesToProcess) == 0 {
 		fmt.Println("No audio recorded.")
 		return
 	}
 
 	fmt.Println("📤 Sending recorded audio to server...")
-	transcription, err := sendAudioToServer(pCapturedSamples)
-	if err != nil {
-		fmt.Println("Error sending audio:", err)
-	} else {
-		fmt.Println("✅ Transcription received:", transcription)
+	// Call the refactored handler function in a goroutine to avoid blocking
+	go handleAudioTranscription(samplesToProcess)
+}
 
-		// Save current clipboard, paste transcription, then restore clipboard
-		fmt.Println("⌨️  Pasting transcription...")
-		originalClipboardContent, err := robotgo.ReadAll()
-		if err != nil {
-			fmt.Println("Warning: Could not read clipboard:", err)
-			// Fallback to typing if clipboard read fails
+// Handles sending audio, getting transcription, storing results, and typing/pasting.
+// Runs in its own goroutine.
+func handleAudioTranscription(audioData []byte) {
+	// Make a local copy of the audio data to prevent race conditions
+	// if the original slice is modified elsewhere (though unlikely with current logic).
+	audioDataCopy := make([]byte, len(audioData))
+	copy(audioDataCopy, audioData)
+
+	transcription, err := sendAudioToServer(audioDataCopy)
+	if err != nil {
+		fmt.Println("Error sending/transcribing audio:", err)
+		// Don't update lastTranscription on error, but audio is already saved
+		return
+	}
+
+	fmt.Println("✅ Transcription received:", transcription)
+
+	// Store only the transcription on success
+	mutex.Lock()
+	lastTranscription = transcription
+	mutex.Unlock()
+
+	// --- Clipboard/Typing Logic ---
+	// This part interacts with the UI, potential for delays/errors
+	fmt.Println("⌨️  Pasting/Typing transcription...")
+	originalClipboardContent, err := robotgo.ReadAll()
+	if err != nil {
+		fmt.Println("Warning: Could not read clipboard:", err)
+		// Fallback to typing if clipboard read fails
+		robotgo.TypeStr(transcription)
+	} else {
+		// Restore clipboard content when the function exits
+		defer func() {
+			if err := robotgo.WriteAll(originalClipboardContent); err != nil {
+				fmt.Println("Warning: Could not restore clipboard:", err)
+			}
+		}()
+
+		// Write transcription to clipboard and paste
+		if err := robotgo.WriteAll(transcription); err != nil {
+			fmt.Println("Warning: Could not write to clipboard:", err)
+			// Fallback to typing if clipboard write fails
 			robotgo.TypeStr(transcription)
 		} else {
-			// Restore clipboard content when the function exits
-			defer func() {
-				if err := robotgo.WriteAll(originalClipboardContent); err != nil {
-					fmt.Println("Warning: Could not restore clipboard:", err)
-				}
-			}()
-
-			// Write transcription to clipboard and paste
-			if err := robotgo.WriteAll(transcription); err != nil {
-				fmt.Println("Warning: Could not write to clipboard:", err)
-				// Fallback to typing if clipboard write fails
-				robotgo.TypeStr(transcription)
-			} else {
-				robotgo.KeyTap("v", "cmd")
-			}
+			robotgo.KeyTap("v", "cmd") // Or "ctrl" for Windows/Linux
 		}
 	}
 }
